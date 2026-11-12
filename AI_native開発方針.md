@@ -488,6 +488,8 @@ AIに実装を任せる範囲を広げるには、生成物の品質に加えて
 
 ### 評価する対象を分ける
 
+![Application EvalsとHarness Evalsの検出力をMeta Evalsで確認し、結果を評価ケースの改善に戻す流れ](./images/mutation-testing-eval-layers.png)
+
 | 評価対象 | 確かめること |
 | --- | --- |
 | Application Evals | ハーネスが生成したアプリケーションが、要件や業務ルールを満たすか |
