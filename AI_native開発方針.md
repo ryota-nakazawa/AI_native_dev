@@ -773,3 +773,855 @@ Golden DatasetやMutation Testingは、このプロセスの検証を支える�
 > 実際に観測した失敗を再現可能なテストケースに変換し、必要な再発防止策を積み重ねながら、ハーネスを段階的に育てる。
 
 利用者が行う作業を簡単に保つには、キットを支えるルール、評価、リリースの仕組みを開発チームが継続して改善する必要がある。実際の失敗をGolden Datasetに蓄積し、Mutation Testingで検出力を確かめることで、プロンプトに加えて開発プロセスの信頼性も高め、組織で安心して使える開発基盤を育てる。
+
+## REAによる設計知識の抽出と、Databricksを活用した非エンジニア向け開発キットの高度化
+
+> **技術構想・設計メモ**  
+> 作成日：2026年11月15日  
+> 対象：非エンジニアが自然言語からモック／プロトタイプを作成するための開発キット  
+> 注記：本書は会話で検討した**構想・設計案**を整理したもの。REAやDatabricksの製品仕様として確認できる事項と、今後実装・実験すべき提案を分けて記載する。
+
+---
+
+### 0. エグゼクティブサマリー
+
+本構想は、**既存Webアプリの観測と解析から、再利用可能な「設計パターン＋テストパターン」を収集し、非エンジニア向け開発キットが要求に応じて検索・利用できるようにする**ものである。
+
+- **REA（Reverse Engineer Anything）** は、ソースコードを持たないアプリでも、画面の振る舞い、ネットワーク通信、ブラウザに配信されたJavaScriptなどを調べ、実装構造を**証拠付きで推定するための専門ツール群**である。Webだけでなくネイティブバイナリなども解析対象に含む。本書はWebアプリ中心に扱う。
+- **通常のCodexでも同様の調査は可能**。Playwright・CDPなどで画面操作／通信収集を行い、JavaScriptと突き合わせるよう指示すればよい。REAの価値は、静的解析・依存関係の抽出・根拠の追跡などが**再利用可能な解析ツールとして標準装備**されている点にある。
+- REAが推定した構造を、そのまま「良い設計」と認定して保存するのは危険。**観測事実 → 推定構造 → 抽象化した設計パターン → 品質検証済みの推奨パターン**の工程が必要である。
+- 設計パターンには、構成要素や適用条件だけでなく、**正常系・異常系・境界値・セキュリティ・ユーザーストーリーのテスト観点**も紐づける。これにより、設計支援だけでなく、生成したアプリの**品質保証（QA）を支える仕組み**にもなる。
+- **Databricksで実現可能**。おすすめの初期構成は、Unity Catalogで管理する**Deltaテーブル**に正本となる構造化データを置き、検索用Deltaテーブルから**Databricks AI Search（Delta Sync Index）**を構築する方式。RDBのように主キー・関連IDで関係を表現できる。ただしDeltaテーブルはPostgreSQLのRDBとは異なり、PK/FKは原則**情報的制約**であって強制されない。
+- **AI SearchとRDBの接点はID**。検索インデックスはEmbeddingだけの箱ではなく、`chunk_id`（検索レコードID）と`pattern_id`（設計パターンID）等のメタデータを保持できる。検索で`pattern_id`を受け取り、SQLで詳細・依存関係・テスト観点を取り出す。**AI Search自体がRDBのJOINを自動で実行するわけではない**。
+- 別案として、**Lakebase（PostgreSQL）＋Lakebase Search**を使えば、RDBとベクトル検索を単一のDB内にまとめられる。小規模・更新中心のプロトタイプで比較対象になる。
+
+#### 本構想の到達イメージ
+
+**ユーザー**：「社員を名前や部署で検索できるアプリを作りたい」  
+→ **AI Search**：「キーワード検索」「条件フィルタリング」「一覧表示」などの候補を検索  
+→ **DB**：適用条件、構成要素、依存関係、API設計、テスト観点、検証実績を取得  
+→ **Codex／開発キット**：過剰な設計を避けて組み合わせ、プロトタイプを生成  
+→ **テスト**：登録済み観点に基づいて機能・例外処理・品質を検証し、結果を知識DBへ還元する。
+
+---
+
+### 1. REAとは何か
+
+#### 1.1 目的と位置づけ
+
+[REA（morluto/rea）](https://github.com/morluto/rea) は、AIエージェントからリバースエンジニアリング用のツールを利用できるようにするプロジェクトである。MCPやCLIを通じて利用でき、Webページ、JavaScript/Electron、ネイティブバイナリなどを対象とする。[参考1]
+
+Webアプリを例にすると、**システムのソースコード一式が手元になくても**、ユーザーから観測できる範囲の情報を収集し、機能の実装構造を推定できる。
+
+| 利用する情報 | 観測・分析できる例 | 限界 |
+|---|---|---|
+| 画面と操作 | DOM、ボタン操作、画面遷移、表示状態の変化 | 表示されていないサーバー内部の処理は直接わからない |
+| HTTP/API通信 | リクエストURL・メソッド、レスポンス、通信の順序 | 通信の中身が取得できない場合や、サーバーの処理方式は不明 |
+| 配信JavaScript | イベント処理、ルーティング、API呼び出し、クライアント側のデータ処理 | バンドル化・難読化・動的実行・欠損により追跡できない場合がある |
+| 静的解析の結果 | モジュール依存、変数の参照、関数呼び出し、データフロー候補 | 静的に関連が見つかったことは、その経路が実行された証拠ではない |
+
+#### 1.2 何が「専門ツール」なのか
+
+REAの価値は「LLMが画面と通信ログを読める」だけではない。特にJavaScript解析では、コードを人間の文章として要約する前に、**プログラム解析アルゴリズムで関係を抽出し、グラフとして保持できる**ことが重要である。[参考2]
+
+代表的な解析ワークフロー／ツール名の例：
+
+- `analyze_javascript_application`：JavaScriptアプリのモジュール構造等を解析。
+- `trace_javascript_semantics`：変数・関数・引数・戻り値・Promise等の意味的な関係をたどる。
+- `trace_application_feature`：特定の機能から関連する構造を追跡。
+- `reconcile_javascript_runtime`：静的解析結果と実行時に観測したアーティファクトの対応関係を照合。
+- ブラウザ観測・ネットワークキャプチャ等：画面の構造、スクリプト、通信の情報を取得。
+
+> 上記は代表例。実際の利用条件、サポート範囲、ツール引数はREAの該当バージョンの公式ドキュメントに従うこと。
+
+#### 1.3 REAを利用した推定フロー
+
+```mermaid
+flowchart TD
+    A["解析対象のWebアプリ"] --> B["ブラウザ操作・画面観測"]
+    A --> C["HTTP/API通信の取得"]
+    A --> D["配信JavaScriptの取得"]
+    B --> E["観測結果（Evidence）"]
+    C --> E
+    D --> F["REA：静的解析・意味解析"]
+    F --> G["モジュール／データフロー／依存関係グラフ"]
+    E --> H["実行時と静的結果の対応付け"]
+    G --> H
+    H --> I["根拠付きの関係情報・未確認事項"]
+    I --> J["Codex等のLLMが設計を推論"]
+    J --> K["推定設計・再現実装・追加検証"]
+```
+
+この処理は「REAが自動的に元の設計書を完全復元する」という意味ではない。**観測できる事実を足場に、説明可能な推定設計を作る**という理解が正確である。
+
+#### 1.4 具体例：検索機能の解析
+
+ブラウザで「AI」と入力して検索すると、例えば以下の通信が観測されるとする。
+
+```http
+POST /api/search
+Content-Type: application/json
+
+{"keyword":"AI"}
+```
+
+配信JSに以下の処理が含まれている場合：
+
+```javascript
+async function search(keyword) {
+  const query = keyword.trim();
+  const response = await fetch('/api/search', {
+    method: 'POST',
+    body: JSON.stringify({ keyword: query })
+  });
+  const data = await response.json();
+  renderResults(data.items);
+}
+```
+
+検索入力とAPIと画面表示の関係は、次のように表現できる。
+
+```mermaid
+flowchart LR
+    A["入力キーワード"] --> B["trim：空白除去"]
+    B --> C["JSON生成"]
+    C --> D["POST /api/search"]
+    D --> E["レスポンスのJSON解析"]
+    E --> F["検索結果を表示"]
+```
+
+**重要な区別**：このグラフが示す関係をどこまで実証できるかは、各辺の根拠によって異なる。API呼び出しを画面操作で観測した事実、JS内で静的に見つかった依存関係、LLMの推論を混同しない。
+
+#### 1.5 Codexに直接指示する場合との違い
+
+「Playwrightで画面を操作し、CDPで通信・レスポンスを取得し、ブラウザのJSと突き合わせて設計を推論して」とCodexに依頼するだけでも、**目的の大部分は達成可能**である。REAでしか不可能な推論能力があるわけではない。
+
+| 観点 | Codex＋一般的なブラウザ／コードツール | Codex＋REA |
+|---|---|---|
+| 画面操作・通信取得 | Playwright、CDP、HAR等を利用可能 | 専用の観測ワークフローとして利用可能 |
+| JavaScriptの読解 | LLMが関連箇所を読み、必要に応じて検索・解析スクリプトを作る | 静的解析器が関係を抽出し、構造化した結果を返す |
+| 大規模JSの関連箇所探索 | 調査手順やスクリプトの作り方に依存 | 関係グラフの起点から追跡できる |
+| 根拠・未確認事項 | プロンプトや追加実装次第 | Evidenceや不明点を扱う仕組みがある |
+| 再現性 | 指示や利用ツールの違いに影響されやすい | 定義済みの解析処理を繰り返し利用しやすい |
+| トークン使用量 | 大量のJSを読むと大きくなる可能性 | 必要な解析結果を絞ってLLMに渡せる可能性 |
+
+**要点**：REAはCodexの置き換えではなく、**決定論的・機械的に処理できる部分を専門解析器へオフロードする仕組み**として捉えると理解しやすい。
+
+トークン削減や解析精度の向上は期待できるが、**常に削減・向上するとは限らない**。解析の前処理コスト、結果の規模、追加調査回数を含めて比較実験が必要である。
+
+#### 1.6 得られる情報の信頼度を分ける
+
+| レベル | 具体例 | DBでの扱い |
+|---|---|---|
+| **Observed（観測）** | 操作後に`POST /api/search`が発生 | 実行条件・ログ参照を付けて保存 |
+| **Static（静的解析）** | JSに`fetch('/api/search')`が存在 | 対象ファイル・ハッシュ・位置を付けて保存 |
+| **Inferred（推定）** | 検索処理の責務分割やフローの解釈 | 推論根拠・未確認点とセットで保存 |
+| **Unknown（不明）** | DBの種類、検索アルゴリズム、サーバー内の認可 | 確定扱いせず、追加検証項目として保存 |
+
+**特に重要**：ブラウザで利用可能なWebサービスからは、そのサービスの**バックエンド実装や設計意図を原則として確定できない**。既存アプリの外から見える構造と、推奨設計として補完した構造を区別する。
+
+---
+
+### 2. REAの推定結果を設計テンプレートとして蓄積する構想
+
+#### 2.1 着想
+
+Web上のアプリケーションには、検索、一覧、フォーム入力、承認、ステータス管理、ファイルアップロードなどの共通機能が繰り返し現れる。
+
+既存アプリを解析することで「この機能はどのような構成要素・データの流れで実現されていそうか」という**設計知識**を抽出し、再利用できるパターンとして蓄積できる可能性がある。
+
+非エンジニアが自然言語でアプリの要望を伝えたとき、開発キットは毎回ゼロから設計を考えるのではなく、**機能に適した設計パターンを検索・選択・組み合わせる**。
+
+ただし、目的はプロダクション級の複雑な設計を無条件で持ち込むことではない。**簡単に動くモック／プロトタイプを、過剰な複雑性なしに一定の品質で作る**ことが最優先となる。
+
+#### 2.2 設計パターン化までの知識化パイプライン
+
+```mermaid
+flowchart TB
+    subgraph COLLECT["A. 設計知識の収集・審査"]
+        A["解析が許可された既存Webアプリ"] --> B["REAで操作・通信・JSを解析"]
+        B --> C["観測Evidence＋静的解析グラフ"]
+        C --> D["LLMで共通の設計構造を抽象化"]
+        D --> E["レビュー：適用条件・安全性・過剰設計を確認"]
+        E --> F["設計パターン＋テストパターン"]
+    end
+    subgraph STORE["B. ナレッジ基盤（Databricks）"]
+        F --> G[("設計パターンDB")]
+        G --> H["AI Search：類似要求から検索"]
+    end
+    subgraph DEVELOP["C. 非エンジニア向け開発キット"]
+        U["自然言語の要求"] --> K["要求を機能に分解"]
+        K --> H
+        H --> L["候補IDを取得・適用条件を確認"]
+        G --> L
+        L --> M["最小構成で設計・実装"]
+        M --> N["関連テストを実行・評価"]
+    end
+    N -. "評価結果の還元" .-> G
+```
+
+**REAの解析結果そのものを無審査でテンプレートにしない**。情報の品質を担保するため、抽象化・評価・承認を挟む。
+
+#### 2.3 蓄積すべき情報：単なるコードテンプレートではない
+
+設計パターンは、少なくとも以下のような情報を持つことが望ましい。
+
+| 項目 | 目的 | 例 |
+|---|---|---|
+| パターンID・バージョン | 識別・追跡 | `P-SEARCH-001`, `v1` |
+| 機能名・目的 | 意味検索・分類 | 「条件フィルタリング」 |
+| 適用条件 | 必要なときに選択 | 「複数属性でデータを絞り込む」 |
+| 非適用条件・トレードオフ | 過剰設計の抑制 | 「数件の固定リストなら不要」 |
+| 設計要素 | 実装の雛形 | SearchInput、API、ResultsList |
+| データ／制御フロー | 要素間の結びつき | 入力検証→API→結果描画 |
+| インターフェース契約 | 入出力を定義 | `GET /employees?department=...`など |
+| 依存パターン | 必須構成を網羅 | エラー表示、入力検証、権限確認 |
+| テスト観点 | QAへの接続 | 空入力、0件、タイムアウト、権限拒否 |
+| 検証履歴 | 品質の根拠 | 採用回数、テスト成績、レビュー状況 |
+| Evidence・出典 | 推定結果の追跡 | 観測URL・ログ・JSハッシュ等（機密除去） |
+| 対応技術・難易度 | 実装時の選択 | React／Node、プロト向けなど |
+
+#### 2.4 サンプル：条件フィルタリングの設計パターン
+
+```json
+{
+  "pattern_id": "P-002",
+  "version": 1,
+  "name": "条件フィルタリング",
+  "intent": "複数属性を用いて一覧データを絞り込む",
+  "applicability": [
+    "社員を部署・勤務地・職種などで絞り込む",
+    "複数の条件を組み合わせて検索する"
+  ],
+  "design": {
+    "components": ["FilterForm", "SearchAPI", "ResultList"],
+    "flow": ["入力条件の検証", "API呼び出し", "結果の描画"],
+    "alternatives": ["小規模ならクライアント側フィルタ", "大量ならサーバー側フィルタ"]
+  },
+  "required_patterns": ["P-ERROR-001"],
+  "test_cases": ["T-FILTER-EMPTY", "T-FILTER-MULTI", "T-FILTER-ERROR"],
+  "review_status": "approved"
+}
+```
+
+これは**提案する保存形式の例**であり、REAがこのJSONをそのまま出力するという意味ではない。
+
+#### 2.5 「良い設計」から「良いテスト」への接続
+
+設計パターンに入力、出力、状態、依存関係、例外処理、禁止条件を明示できれば、そこからテスト観点を導出できる。
+
+例：社員検索の設計パターンから生成するテスト。
+
+| テスト分類 | ケース | 期待する挙動 |
+|---|---|---|
+| 正常系 | 社員名で検索 | 一致する社員を表示 |
+| 正常系 | 部署で絞り込み | 指定部署のみ表示 |
+| 境界値 | 空文字／空白入力 | 仕様に従った初期表示または入力制御 |
+| 異常系 | APIタイムアウト | エラー表示、再試行可能なUI |
+| 異常系 | 検索結果0件 | 0件表示と適切な案内 |
+| 操作性 | 連続入力・重複リクエスト | 古い応答で新しい結果を上書きしない |
+| セキュリティ | 権限のないデータを要求 | サーバー側でアクセスを拒否 |
+
+**因果関係**：
+
+1. 設計を構造化すると、実装すべき責務と期待動作が明確になる。
+2. 期待動作が明確だと、テストの入力・事前条件・期待結果を設計しやすくなる。
+3. テストが実装・自動実行されれば、LLMが作ったプロトタイプでも不具合の検出可能性が上がる。
+4. テスト結果や修正履歴をDBへ還元すれば、次回以降のパターン選択と設計を改善できる。
+
+ただし、**設計パターンを参照しただけで品質が保証されるわけではない**。QAには、生成後の実テスト、レビュー、必要に応じたセキュリティ確認が不可欠である。
+
+#### 2.6 機能パターンの組み合わせでアプリを作る
+
+「社員を検索するアプリを作りたい」という要求に対して、開発キットが次のように振る舞う。
+
+1. ユーザーの言葉を「社員一覧」「キーワード検索」「条件フィルタリング」に分解。
+2. 検索で各機能の設計候補を発見。
+3. 必須依存（エラー処理、入力検証、権限制御が必要か等）をチェック。
+4. プロトタイプという前提に合わせ、必要十分な構成だけを採用。
+5. 設計パターンに付随するテスト項目を実行。
+6. 結果を記録し、失敗したパターンや適用条件を見直す。
+
+これにより「非エンジニアが設計知識を詳細に入力しなくても、開発キット側で設計の判断を補助する」ことを目指す。
+
+---
+
+### 3. Databricksを使った実現性と全体アーキテクチャ
+
+#### 3.1 Databricksは何を担当するのか
+
+| 機能 | 役割 |
+|---|---|
+| **Unity Catalog** | テーブル／検索インデックスの管理・アクセス制御 |
+| **Delta Lake（Deltaテーブル）** | 設計パターン、構成要素、Evidence、テスト、評価履歴などの正本を保存 |
+| **Databricks AI Search** | 自然言語の要求に意味的に近い設計パターンを取得 |
+| **SQL／アプリAPI** | AI Searchで見つけたIDを使い、詳細や依存関係を正確に取得 |
+| **Jobs／ワークフロー（任意）** | REA解析後の変換、審査、Embedding更新、評価集計などを自動化 |
+| **Lakebase（代替案）** | PostgreSQLとしてパターンを管理し、必要ならLakebase Searchで検索も同居させる |
+
+**推奨初期案**：パターンDBをDeltaテーブルで管理し、検索用のDeltaテーブルを**AI SearchのDelta Sync Index**に接続する。[参考3][参考4]
+
+#### 3.2 推奨アーキテクチャ：Delta Lake＋AI Search＋Codex
+
+```mermaid
+flowchart TB
+  subgraph ANALYZE["知識作成側：収集・正規化"]
+    WEB["許可された既存Webアプリ"] --> REA["REA：ブラウザ・通信・JS解析"]
+    REA --> EV["Evidence／静的解析グラフ"]
+    EV --> NORMALIZE["LLMによる抽象化＋品質レビュー"]
+  end
+
+  subgraph DATA["Databricks：構造化データの正本"]
+    PAT[("design_patterns")]
+    COM[("components")]
+    REL[("relationships")]
+    TST[("test_cases")]
+    EVD[("evidence / evaluations")]
+    DOC[("pattern_search_documents：検索用Deltaテーブル")]
+    INDEX[("AI Search：Delta Sync Index")]
+    PAT -->|"pattern_idを維持"| DOC
+    DOC -->|"Delta Sync：ID・検索文・メタデータ"| INDEX
+    PAT --- COM
+    PAT --- REL
+    PAT --- TST
+    PAT --- EVD
+  end
+
+  NORMALIZE --> PAT
+  NORMALIZE --> COM
+  NORMALIZE --> REL
+  NORMALIZE --> TST
+  NORMALIZE --> EVD
+
+  subgraph KIT["非エンジニア向け開発キット"]
+    USER["自然言語の要求"] --> CODEX["Codex／オーケストレーター"]
+    CODEX -->|"自然言語で検索"| INDEX
+    INDEX -->|"chunk_id ＋ pattern_id ＋ version"| CODEX
+    CODEX -->|"IDでSQL／APIから詳細取得"| PAT
+    CODEX -->|"依存・テスト・評価を取得"| COM
+    CODEX --> REL
+    CODEX --> TST
+    CODEX --> EVD
+    CODEX --> BUILD["設計・実装・テスト"]
+  end
+  BUILD -. "評価結果の追記" .-> EVD
+```
+
+この図で特に重要なのは次の3点。
+
+1. **設計パターンの正本はDBにあり、AI Searchは検索用のインデックス**である。
+2. **検索用Deltaテーブルには元パターンのIDを保持**し、それがインデックスにも同期される。
+3. **AI Searchで見つけたIDを使い、詳細やテスト観点をSQLで取得**する。検索とJOINの役割を分離する。
+
+#### 3.3 DeltaテーブルとRDBの違い
+
+Delta LakeはSQLで扱う表形式データ基盤で、`design_patterns`と`components`を`pattern_id`でJOINするなど、**RDBと同じようなリレーショナルモデリングができる**。
+
+ただし重要な差異がある。
+
+- DatabricksのDeltaテーブルでは、`NOT NULL`や`CHECK`制約は強制できる。
+- 一方、**PRIMARY KEY／FOREIGN KEY／UNIQUEは情報的制約であり、通常のRDBのような参照整合性を自動強制しない**。[参考5]
+- そのためIDの一意性、存在しない親IDを参照しないこと、バージョンの整合性などは、登録処理・品質チェック・パイプラインで検証する必要がある。
+
+**補足**：真にRDBとしてのトランザクションとPK/FK強制を中心にしたい場合は、Databricksの**Lakebase（PostgreSQL）**が代替候補になる。[参考6]
+
+---
+
+### 4. DBの具体的な持ち方：設計パターンをRDB的に管理する
+
+#### 4.1 推奨する論理データモデル
+
+最低限の要素は、パターン、構成要素、依存関係、根拠、テスト、評価の6種類。さらに**検索用ドキュメント**を別テーブルとして管理するのが望ましい。
+
+```mermaid
+erDiagram
+  DESIGN_PATTERNS ||--o{ COMPONENTS : has
+  DESIGN_PATTERNS ||--o{ PATTERN_RELATIONSHIPS : source_pattern
+  DESIGN_PATTERNS ||--o{ EVIDENCE : supported_by
+  DESIGN_PATTERNS ||--o{ TEST_CASES : verified_with
+  DESIGN_PATTERNS ||--o{ EVALUATIONS : evaluated_by
+  DESIGN_PATTERNS ||--o{ SEARCH_DOCUMENTS : indexed_as
+
+  DESIGN_PATTERNS {
+    string pattern_id PK
+    int version
+    string name
+    string category
+    string intent
+    string applicability
+    string review_status
+    json design_spec
+  }
+  COMPONENTS {
+    string component_id PK
+    string pattern_id FK
+    string role
+    string interface_contract
+  }
+  PATTERN_RELATIONSHIPS {
+    string relation_id PK
+    string source_pattern_id FK
+    string target_pattern_id FK
+    string relation_type
+  }
+  EVIDENCE {
+    string evidence_id PK
+    string pattern_id FK
+    string evidence_type
+    string source_ref
+    string authority
+  }
+  TEST_CASES {
+    string test_id PK
+    string pattern_id FK
+    string precondition
+    string action
+    string expected_result
+  }
+  EVALUATIONS {
+    string evaluation_id PK
+    string pattern_id FK
+    string test_id FK
+    string result
+    string run_ref
+  }
+  SEARCH_DOCUMENTS {
+    string chunk_id PK
+    string pattern_id FK
+    int pattern_version
+    string search_text
+    string review_status
+  }
+```
+
+> 図中の`PK`／`FK`は**論理上のキー**を表す。Deltaテーブルで同等の制約が自動強制されるという意味ではない。実装上は`pattern_id`だけでなく**バージョンも含む参照**を検討する。
+
+#### 4.2 各テーブルの例
+
+**① `design_patterns`：パターン本体（正本）**
+
+| pattern_id | version | name | intent | review_status |
+|---|---:|---|---|---|
+| P001 | 1 | キーワード検索 | 名前や単語から探す | approved |
+| P002 | 1 | 条件フィルタリング | 属性で絞り込む | approved |
+| P003 | 1 | 一覧表示 | 複数件を表形式で表示 | approved |
+
+実装詳細、適用条件、非適用条件、設計上の選択肢などは列またはJSON型に保存する。
+
+**② `components`：設計の構成要素**
+
+| component_id | pattern_id | name | role |
+|---|---|---|---|
+| C001 | P002 | FilterForm | 条件を入力 |
+| C002 | P002 | SearchAPI | 条件をAPIに渡す |
+| C003 | P002 | ResultList | 結果を表示 |
+
+**③ `pattern_relationships`：設計パターンの関係**
+
+| source_pattern_id | relation_type | target_pattern_id |
+|---|---|---|
+| P002 | requires | P-ERROR |
+| P001 | often_combined_with | P003 |
+
+※ `requires`は必須、`often_combined_with`は推奨・任意、といった**関係種別を明確にする**。
+
+**④ `evidence`：REAの調査根拠**
+
+| evidence_id | pattern_id | evidence_type | observation |
+|---|---|---|---|
+| E001 | P002 | runtime_observed | 入力時に検索APIを呼ぶ |
+| E002 | P002 | static_observed | JSに条件変換処理が存在 |
+| E003 | P002 | inferred | APIと表示更新の連携を推定 |
+
+**⑤ `test_cases`：設計から導出したテスト**
+
+| test_id | pattern_id | category | expected_result |
+|---|---|---|---|
+| T001 | P002 | normal | 指定部署のみ返る |
+| T002 | P002 | edge | 0件時に適切に案内 |
+| T003 | P002 | error | API失敗時にエラー表示 |
+
+**⑥ `evaluations`：実装・検証の実績**
+
+| evaluation_id | pattern_id | test_id | result |
+|---|---|---|---|
+| V001 | P002 | T001 | PASS |
+| V002 | P002 | T003 | FAIL |
+
+**⑦ `pattern_search_documents`：AI Searchの同期元**
+
+| chunk_id | pattern_id | pattern_version | search_text | review_status |
+|---|---|---:|---|---|
+| P002-1-A | P002 | 1 | 部署や職種で一覧データを絞り込む | approved |
+| P002-1-B | P002 | 1 | 複数条件フィルターと検索結果の管理 | approved |
+| P003-1-A | P003 | 1 | 複数の結果を表形式で表示する | approved |
+
+`pattern_search_documents`を分ける理由：1つの設計パターンを**複数の文章・観点に分けて検索**でき、正本の複雑なJSONをすべて検索インデックスに載せずに済むから。
+
+#### 4.3 検索用のテキストはどう作るか
+
+**良い例**：
+
+> パターン：条件フィルタリング。社員・商品・申請などの一覧データを、部署・カテゴリ・状態などの属性で絞り込む。複数の条件を組み合わせる画面で利用する。大量データならサーバー側で条件を処理する。
+
+**避けたい例**：
+
+> P002 FilterPattern
+
+AI Searchは意味の近い文章を検索するため、専門用語だけでなく、**非エンジニアが自然に使いそうな表現**を含めることが重要。
+
+---
+
+### 5. AI SearchとRDB／Deltaテーブルは、具体的にどう紐づくのか
+
+#### 5.1 結論：Embeddingだけでなく、元レコードの識別子も持つ
+
+AI Searchは「Embeddingだけを記録する無関係な別DB」ではない。**Delta Sync Index**を使うと、検索元テーブルの主キーや指定した追加カラムがインデックスに同期される。[参考3]
+
+この構成でのキーの役割は次の通り。
+
+| キー | 所属 | 役割 |
+|---|---|---|
+| `pattern_id` | 設計パターンの正本 | どの設計パターンかを示す |
+| `version`／`pattern_version` | 正本・検索用テーブル | どのバージョンの設計かを示す |
+| `chunk_id` | 検索用テーブル・AI Search | 検索インデックス内の1レコードを一意に特定する |
+| `component_id`／`test_id` | 各詳細テーブル | パターンに属する構成要素やテストを識別する |
+
+**設計上の核心**：検索インデックスの主キーを`chunk_id`とし、検索結果に`pattern_id`と`pattern_version`も返す。元の詳細テーブルをその組み合わせで検索する。
+
+#### 5.2 データの紐づき図（最重要）
+
+```mermaid
+flowchart LR
+    subgraph R["正本：構造化Deltaテーブル（RDB的に管理）"]
+      P["design_patterns<br/>pattern_id = P002<br/>version = 1<br/>design_spec = {...}"]
+      C["components<br/>pattern_id = P002<br/>SearchAPI / FilterForm"]
+      T["test_cases<br/>pattern_id = P002<br/>T001 / T002 / T003"]
+      P ---|"IDでJOIN"| C
+      P ---|"IDでJOIN"| T
+    end
+
+    subgraph S["検索用Deltaテーブル"]
+      SD["pattern_search_documents<br/>chunk_id = P002-1-A<br/>pattern_id = P002<br/>pattern_version = 1<br/>search_text = 属性で絞り込む"]
+    end
+
+    subgraph V["AI Search インデックス"]
+      VI["検索レコード<br/>chunk_id = P002-1-A<br/>pattern_id = P002<br/>pattern_version = 1<br/>embedding = 数値ベクトル"]
+    end
+
+    P -->|"検索文を生成・IDを転記"| SD
+    SD -->|"Delta Sync"| VI
+    U["ユーザー：部署で社員を絞りたい"] --> APP["Codex／開発キット"]
+    APP -->|"意味検索"| VI
+    VI -->|"P002 / version 1"| APP
+    APP -->|"IDとversionで詳細を取得"| P
+    APP -->|"関連要素・テストを取得"| C
+    APP --> T
+```
+
+> この図のように、**AI Searchと正本テーブルの紐づけは共通のIDで成立する**。AI Searchは関連テーブルを勝手にJOINしてくれるのではない。アプリ側（または検索後のAPI）が追加のSQLを実行する。
+
+#### 5.3 データ登録から検索まで：具体的な5ステップ
+
+1. **正本を登録**：`design_patterns`に`P002`の設計仕様、`components`に構成要素、`test_cases`にテストを登録。
+2. **検索用行を生成**：`pattern_search_documents`に`chunk_id=P002-1-A`、`pattern_id=P002`、`pattern_version=1`、`search_text=...`を記録。
+3. **AI Searchに同期**：Delta Sync Indexが検索対象のテキストとID／メタデータを保持。EmbeddingはDatabricks管理モデルで生成する方式、または自前のベクトルを渡す方式を選べる。
+4. **自然言語で検索**：「社員を部署ごとに絞り込みたい」を入力すると、類似する検索用行がヒット。結果から`P002`を取得。
+5. **SQLで詳細・テスト取得**：`P002`かつ`version=1`に対応する設計、構成要素、テスト、評価を取得し、Codexに渡す。
+
+#### 5.4 検索から詳細取得までのシーケンス図
+
+```mermaid
+sequenceDiagram
+    actor User as 非エンジニア
+    participant Kit as 開発キット（Codex）
+    participant Search as Databricks AI Search
+    participant DB as Deltaテーブル／SQL
+    participant Test as テスト実行器
+
+    User->>Kit: 社員を部署ごとに絞れるアプリが欲しい
+    Kit->>Search: 自然言語の要求で検索
+    Search-->>Kit: chunk_id=P002-1-A, pattern_id=P002, version=1
+    Kit->>DB: pattern_id=P002, version=1 の詳細を取得
+    DB-->>Kit: 設計仕様・構成要素・依存関係・テスト観点
+    Kit->>Kit: 適用条件・プロトタイプの範囲を判断
+    Kit->>Kit: 設計とコードを生成
+    Kit->>Test: 登録済みテスト観点から検証を実行
+    Test-->>Kit: PASS／FAIL、実行ログ
+    Kit->>DB: テスト結果と採用パターンを記録
+    Kit-->>User: 動作するプロトタイプと検証結果
+```
+
+#### 5.5 検索結果の例
+
+```json
+{
+  "matches": [
+    {
+      "chunk_id": "P002-1-A",
+      "pattern_id": "P002",
+      "pattern_version": 1,
+      "name": "条件フィルタリング"
+    },
+    {
+      "chunk_id": "P001-1-A",
+      "pattern_id": "P001",
+      "pattern_version": 1,
+      "name": "キーワード検索"
+    }
+  ]
+}
+```
+
+これは**理解のための簡略化したレスポンス例**であり、Databricks SDKがこのJSONをそのまま返すという意味ではない。
+
+#### 5.6 IDを使ったSQL取得例
+
+```sql
+-- AI Searchが返した pattern_id と version に対応する設計本体
+SELECT *
+FROM main.design_knowledge.design_patterns
+WHERE pattern_id = 'P002'
+  AND version = 1;
+
+-- 設計に必要な構成要素
+SELECT *
+FROM main.design_knowledge.components
+WHERE pattern_id = 'P002'
+  AND pattern_version = 1;
+
+-- 関連するテスト観点
+SELECT *
+FROM main.design_knowledge.test_cases
+WHERE pattern_id = 'P002'
+  AND pattern_version = 1;
+```
+
+`pattern_version`列は、パターン更新後に古い検索結果やテストを別バージョンと混同しないために付与するのが望ましい。
+
+#### 5.7 Databricksに作成するテーブルのSQL例
+
+```sql
+-- 説明用の最小スキーマ例。実運用では一意性・参照関係・更新ルールを別途検証。
+CREATE SCHEMA IF NOT EXISTS main.design_knowledge;
+
+CREATE TABLE IF NOT EXISTS main.design_knowledge.design_patterns (
+  pattern_id STRING NOT NULL,
+  version INT NOT NULL,
+  name STRING NOT NULL,
+  category STRING,
+  intent STRING,
+  applicability STRING,
+  design_spec VARIANT,
+  review_status STRING,
+  updated_at TIMESTAMP
+) USING DELTA;
+
+CREATE TABLE IF NOT EXISTS main.design_knowledge.pattern_search_documents (
+  chunk_id STRING NOT NULL,
+  pattern_id STRING NOT NULL,
+  pattern_version INT NOT NULL,
+  name STRING,
+  search_text STRING,
+  review_status STRING
+) USING DELTA;
+```
+
+**補足**：AI SearchのDelta Sync Indexを作成するときには、`chunk_id`をインデックス側の`primary_key`として指定する。標準エンドポイントを利用する場合は、変更データフィード（Change Data Feed）等の前提条件を確認する。[参考3]
+
+#### 5.8 AI Searchのインデックス作成／検索のコード例
+
+以下は**コンセプトを示すPython SDKの例**。事前にUnity Catalog、AI Searchエンドポイント、Embedding用のモデルエンドポイント、アクセス権を用意する必要がある。エンドポイント名・モデル名は環境に合わせる。[参考3][参考4]
+
+```python
+from databricks.ai_search.client import AISearchClient
+
+client = AISearchClient()
+
+# 検索用Deltaテーブルからインデックスを作成（初回のみ）
+index = client.create_delta_sync_index(
+    endpoint_name="my_ai_search_endpoint",
+    source_table_name="main.design_knowledge.pattern_search_documents",
+    index_name="main.design_knowledge.pattern_search_index",
+    pipeline_type="TRIGGERED",
+    primary_key="chunk_id",
+    embedding_source_column="search_text",
+    embedding_model_endpoint_name="my_embedding_model_endpoint",
+    columns_to_sync=[
+        "pattern_id", "pattern_version", "name",
+        "review_status", "search_text"
+    ],
+)
+
+# 新規・更新レコードの同期（TRIGGEREDモード）
+index.sync()
+
+# 自然言語で設計候補を取得
+results = index.similarity_search(
+    query_text="社員を名前や部署から絞り込めるようにしたい",
+    columns=["chunk_id", "pattern_id", "pattern_version", "name"],
+    num_results=5,
+    query_type="hybrid"
+)
+
+print(results)
+```
+
+この処理で取得したIDを、SQL取得用のAPIに渡す。その後、詳細な設計パターンやテスト観点をまとめてCodexへ渡す。
+
+**注意**：`TRIGGERED`は手動・明示的な同期実行が必要。即時反映前提なら同期方式・運用を検討する。**検索結果のスコアや順位は、設計の良し悪しを保証するものではない**。
+
+#### 5.9 「Embeddingだけが別DBにある」わけではない
+
+誤解しやすい点をまとめる。
+
+| よくある疑問 | 答え |
+|---|---|
+| ベクトルDBに元DBのIDは保持される？ | **はい**。Delta Sync Indexでは主キーが含まれ、`pattern_id`などのメタデータも同期対象にできる |
+| ベクトル検索を行うと詳細なJSONも全部返る？ | 必須ではない。返す列を選び、詳細は元テーブルから取得する構成が合理的 |
+| AI SearchがDBのJOINも理解する？ | **いいえ**。`pattern_id`等を使ってアプリ側がSQLで取得する |
+| 元テーブルの更新は自動反映？ | Delta Sync Indexなら同期パイプラインを利用。反映タイミングは構成・モードに依存する |
+| 1パターンに複数の検索文章を持てる？ | **はい**。`chunk_id`を個別に付け、共通の`pattern_id`で正本に紐づける |
+| 検索結果が複数チャンクに分かれると？ | アプリ側で`pattern_id + version`ごとにまとめ、重複を整理してから詳細取得する |
+
+---
+
+### 6. Lakebaseを使う場合との違い
+
+今回の目的はDatabricksで実現できるが、必ず「Delta Lake＋別のAI Searchインデックス」という構成しかないわけではない。
+
+Databricksの**Lakebase**はPostgreSQLベースの運用DBとして利用できる。Lakebase Searchではベクトル・キーワード検索の機能を同じDBに追加できる。[参考6]
+
+#### 6.1 2つのアーキテクチャを比較
+
+| 選択肢 | DBの正本 | 自然言語検索 | 紐づけ | 向いているケース |
+|---|---|---|---|---|
+| **A：Delta＋AI Search（本書の初期推奨）** | Deltaテーブル | Databricks AI Search | インデックスが保持する`pattern_id`→SQL取得 | REA分析結果や評価履歴を大量に蓄積・分析したい |
+| **B：Lakebase＋Lakebase Search** | PostgreSQL | pgvector互換のベクトル検索等 | 同じPostgreSQL内のキー・JOIN | 小規模でCRUDが多く、RDBの整合性を重視したい |
+| **C：Lakebase＋Delta＋AI Search** | Lakebaseを業務正本、Deltaを検索用同期先 | Databricks AI Search | データ連携と共通IDで結ぶ | RDBの更新性能とレイクハウス分析を両立したい |
+
+**Cは構成が複雑**になり、同期遅延・二重管理・データ連携の設計が必要になる。最初から選ぶ理由は薄い。
+
+#### 6.2 Lakebase Searchを使う代替図
+
+```mermaid
+flowchart LR
+    U["自然言語の要求"] --> KIT["Codex／開発キット"]
+    subgraph L["Lakebase：PostgreSQL"]
+      P[("design_patterns")]
+      C[("components / test_cases")]
+      V[("検索文＋vector列／検索インデックス")]
+      P --- C
+      P --- V
+    end
+    KIT -->|"意味検索／キーワード検索"| V
+    V -->|"pattern_id"| KIT
+    KIT -->|"同じDB内でJOIN・詳細取得"| P
+    KIT --> C
+```
+
+ここでは**Databricks AI Search（Delta Sync Index）ではなく、Lakebase Search**を使用する。名前は似ているが、同一の仕組みではない。
+
+#### 6.3 どちらを選ぶか
+
+- **まずData/AI基盤としてDatabricksを学び、解析履歴も分析したい**：Delta＋AI Search。
+- **まず小規模な設計パターン管理アプリを作り、RDBとして更新・整合性を重視したい**：Lakebase＋Lakebase Search。
+- **データ量が少なくパターンが数十件だけ**：初期検証ではAI SearchなしのSQL検索や、シンプルなファイルベース検索でも十分な可能性がある。
+
+---
+
+### 7. 開発キットでの利用例：ユーザーの要求から設計・テストまで
+
+#### 7.1 ユーザーが入力
+
+> 「社員情報を名前や部署で検索し、一覧表示できるアプリを作りたい」
+
+#### 7.2 開発キットが要求を分解
+
+- 必要機能：キーワード検索、条件フィルタリング、一覧表示。
+- 必要条件：結果が0件の場合の表示、API失敗時の通知、入力値の検証。
+- プロトタイプとしての制約：小規模データなら不要なキャッシュや複雑な非同期基盤は採用しない。
+
+#### 7.3 AI Searchで候補を取得
+
+| 返る候補（例） | pattern_id | 理由 |
+|---|---|---|
+| キーワード検索 | P001 | 名前による検索に必要 |
+| 条件フィルタリング | P002 | 部署による絞り込みに必要 |
+| 一覧表示 | P003 | 検索結果を表示するため |
+
+> 検索順位や候補は説明用の例。AI Searchは「候補発見」の担当であり、採用可否の最終判断は開発キット側にある。
+
+#### 7.4 SQLで詳細取得し、設計を構築
+
+- `P001`：検索入力、検索API、エラー時の表示。
+- `P002`：部署フィルター、複数条件の組み合わせ。
+- `P003`：結果の表、空状態、件数、必要な場合のページネーション。
+- 依存ルールで必要なパターンを追加。
+- `test_cases`から関連するテストを抽出。
+
+#### 7.5 テストを作成・実行し、評価を登録
+
+- 名前検索、部署検索、複合条件。
+- 0件・入力なし・通信失敗。
+- 連続検索時に古いレスポンスが画面を上書きしないこと。
+- 必要な認可・データ範囲の検証。
+
+**結果**：Codexはゼロから設計を推測するだけでなく、**検索された設計選択肢とテスト観点に根拠を持たせてプロトタイプを作る**ことができる。
+
+---
+
+### 8. 最終的な結論と推奨事項
+
+本構想の要点は、**「優れたアプリをWebから自動コピーする」ことではなく、「実際のアプリの観測から設計知識を抽出し、検証を経て再利用可能な設計・テストパターンとして蓄積する」こと**にある。
+
+1. **REA**は、観測と静的解析により、ソースがなくても機能構造を一定範囲で根拠付きで推定できる。Codexでも類似調査は可能だが、REAは専用解析処理の再利用・構造化・Evidence管理に強みがある。
+2. **設計パターンDB**では、設計要素だけでなく「どんな要求に適用するか」「必要な依存関係」「どうテストするか」「根拠は何か」を保持する。これが非エンジニア向け開発キットの設計品質とテスト品質を支える。
+3. **Databricks**では、まずDeltaテーブルで正本をRDB的にモデル化し、検索用Deltaテーブルに`pattern_id`・`chunk_id`・バージョンを保持してAI Searchに同期するのが実装しやすい。
+4. **AI Searchと正本の紐づけは共通ID**で行う。AI Searchから`pattern_id`を取得し、SQL／APIで設計・依存関係・テスト・評価を追加取得する。
+5. **開発キットは推奨パターンを盲目的に適用しない**。非エンジニア向けのモック／プロトタイプとして必要十分な構成を選び、生成後のテスト結果を知識基盤へ還元する。
+
+#### 一文で表す構想
+
+> **REAを用いて観測したアプリの設計知識を、Databricks上の検索可能な設計・テストパターンとして蓄積し、非エンジニア向け開発キットが自然言語の要求から適切なパターンを選択・実装・検証する仕組み。**
+
+---
+
+### 9. 用語集
+
+| 用語 | 意味 |
+|---|---|
+| REA | AIエージェントから利用できるリバースエンジニアリング用ツール群 |
+| 静的解析 | プログラムを実行せずに構造・関係等を解析すること |
+| 動的観測／実行時観測 | 実際の操作や実行中に生じた画面・通信等を記録すること |
+| Evidence | 観測・解析の結論を裏付ける証拠や参照情報 |
+| 設計パターン | 特定の問題に対する再利用可能な構造・適用条件・選択肢 |
+| テストパターン | 設計から導く代表的な検証観点・期待結果 |
+| Delta Lake | Databricksで利用できるテーブル形式のデータ基盤 |
+| Unity Catalog | データ資産・権限等を管理する仕組み |
+| Databricks AI Search | テーブルに基づく意味検索・キーワード検索などのサービス（旧Vector Search） |
+| Delta Sync Index | 元テーブルと同期するAI Searchインデックス |
+| Embedding | 文章の意味を数値ベクトルに変換した表現 |
+| Lakebase | DatabricksのPostgreSQLベースの運用DB |
+| Lakebase Search | Lakebase内でのベクトル・キーワード・ハイブリッド検索 |
+| `pattern_id` | 元の設計パターンを指す共通ID |
+| `chunk_id` | AI Searchの1検索レコードに対応するID |
+
+---
+
+### 10. 参考資料
+
+> 仕様の確認基準日：2026年11月15日。リンク先の製品仕様やREAのツール名は更新される可能性がある。
+
+1. **REA公式リポジトリ**：https://github.com/morluto/rea  
+   REAの対象領域、MCP/CLI連携、Evidenceを伴う解析について。
+2. **REA JavaScript application workflows**：https://github.com/morluto/rea/blob/main/docs/guides/javascript/javascript-application-workflows.md  
+   `trace_javascript_semantics`、`trace_application_feature`、静的／実行時Evidenceの扱い。
+3. **Databricks — Create AI Search endpoints and indexes**：https://docs.databricks.com/aws/en/ai-search/create-ai-search  
+   Delta Sync Index、`primary_key`、`columns_to_sync`、同期モード、Embedding設定。
+4. **Databricks — Query an AI Search index**：https://docs.databricks.com/aws/en/ai-search/query-ai-search  
+   `AISearchClient`、`similarity_search`、ハイブリッド検索、フィルター、権限。
+5. **Databricks — Constraints on Databricks**：https://docs.databricks.com/aws/en/tables/constraints  
+   Deltaテーブルの`PRIMARY KEY`／`FOREIGN KEY`等の情報的制約と強制される制約。
+6. **Databricks — Lakebase Search**：https://docs.databricks.com/aws/en/oltp/projects/lakebase-search  
+   PostgreSQLにおけるベクトル・キーワード・ハイブリッド検索の代替構成。
