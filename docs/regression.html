@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Regression watch</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="common.css">
+<style>
+  /* 上段の大きな数字 */
+  #tiles { left: 0; top: 0; }
+  .tile { position: absolute; top: 177px; width: 261px; height: 150px; border: 2px solid var(--line); background: #171822;
+    display: flex; flex-direction: column; justify-content: center; align-items: center; }
+  .tile .big { font-size: 46px; line-height: 58px; font-weight: 700; color: var(--c); }
+  #progWrap { left: 42px; top: 356px; width: 1127px; height: 26px; background: rgba(163,217,165,.1); display: flex; overflow: hidden; }
+  #progWrap s { display: block; height: 100%; transition: width .4s; }
+  #cases { top: 420px; height: 500px; }
+  #cases .bar { background: rgba(163,217,165,.1); }
+  #cost { top: 956px; height: 140px; }
+  #log { top: 1132px; height: 266px; padding: 13px 18px 0; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="titlebar"><i style="left:16px;background:#ff5f57"></i><i style="left:38px;background:#febc2e"></i><i style="left:60px;background:#28c840"></i><span id="tb">regression watch</span></div>
+  <div id="header">REGRESSION WATCH  <span class="dim">·</span>  <span id="mode" class="off">CONNECTING</span>  <span class="dim">·</span>  <span id="clock" class="mid">--:--:--</span></div>
+  <div id="rule"></div>
+  <div class="sec" style="top:130px"><b class="green">REGRESSION</b>  <span id="casesTitle"></span></div>
+  <div id="tiles"></div>
+  <div id="progWrap"></div>
+  <div class="panel" id="cases"><span class="title">test cases</span><div id="caseRows"></div></div>
+  <div class="panel" id="cost"><span class="title">cost <span class="dim">(in + cache + out)</span></span><div id="costRows"></div></div>
+  <div class="panel" id="log"><span class="title">tool calls</span><div id="lines"></div></div>
+  <div id="status"></div>
+</div>
+
+<script>window.WATCH_STATIC = true;</script>
+<script src="common.js"></script>
+<script>
+const { $, esc, cut, num, dur, short, tool, fam, HEX, spin, total, nowOf, pickAgents, stateOf, timeOf } = Watch;
+let tags = new Map();
+const addLog = Watch.logger($('lines'), 8, e => tags.get(e.key) || e.name);
+
+function render(d) {
+  const now = nowOf(d), mf = d.manifest || {};
+  const cases = mf.cases || [], ca = pickAgents(d, 'case');
+  const ran = [...ca.values()];
+  const done = cases.filter(c => stateOf(ca.get(c.id)) === 'done');
+  const pass = done.filter(c => ca.get(c.id).result === 'PASS').length, fail = done.filter(c => ca.get(c.id).result === 'FAIL').length;
+  const other = done.length - pass - fail, running = cases.filter(c => stateOf(ca.get(c.id)) === 'run').length;
+  const tok = ran.reduce((t, a) => t + total(a), 0), cmax = Math.max(1, ...ran.map(total));
+  const N = Math.max(1, cases.length);
+  $('casesTitle').textContent = mf.casesTitle || (cases.length ? '' : '— manifest.json に cases がありません —');
+
+  const tiles = [['done', `${done.length}/${cases.length}`, 'blue'], ['pass', pass, 'green'], ['fail', fail, fail ? 'red' : 'dim'], ['running', running, running ? 'orange' : 'dim']];
+  $('tiles').innerHTML = tiles.map(([label, v, c], i) =>
+    `<div class="tile" style="left:${42 + i * (261 + 27.67)}px;--c:${HEX[c]}"><span class="big">${v}</span><span class="mid">${label}</span></div>`).join('');
+  // 進捗の帯: 緑 = PASS、赤 = FAIL、橙 = 結果の行が読めなかった、青 = 実行中
+  $('progWrap').innerHTML = [[pass, HEX.green], [fail, HEX.red], [other, HEX.orange], [running, 'rgba(143,180,248,.55)']]
+    .map(([v, c]) => `<s style="width:${v / N * 100}%;background:${c}"></s>`).join('');
+
+  $('caseRows').innerHTML = `<div class="r head"><span style="width:50px">id</span><span style="width:300px">case</span><span style="width:140px">result</span><span style="width:150px">now</span><span style="width:110px">model</span><span class="num" style="width:60px">time</span><span style="width:20px"></span><span style="width:150px">tokens</span><span class="num" style="width:105px"></span></div>` +
+    cases.slice(0, 14).map(c => {
+      const a = ca.get(c.id), st = stateOf(a);
+      const badge = st === 'queued' ? '<span class="dim">· queued</span>' : st === 'run' ? `<span class="blue">${spin()} running</span>`
+        : a.result === 'PASS' ? '<b class="green">✓ PASS</b>' : a.result === 'FAIL' ? '<b class="red">✗ FAIL</b>' : '<b class="orange">? no result</b>';
+      const doing = st === 'run' ? esc(cut(a.status === 'tool' ? tool(a.lastTool) : 'thinking', 12)) : st === 'done' ? `${a.toolCalls} calls` : '';
+      return `<div class="r ${st}"><span class="mid" style="width:50px">${esc(c.id)}</span><span style="width:300px">${esc(cut(c.label, 20))}</span>` +
+        `<span style="width:140px">${badge}</span><span class="mid" style="width:150px">${doing}</span>` +
+        `<span class="${a ? fam(a.model) : 'dim'}" style="width:110px">${a ? esc(cut(short(a.model), 9)) : '—'}</span>` +
+        `<span class="num dim" style="width:60px">${timeOf(a, now)}</span><span style="width:20px"></span>` +
+        `<span class="bar" style="width:150px;--c:${HEX[a ? fam(a.model) : 'dim']}"><s style="width:${total(a) / cmax * 100}%"></s></span><b class="num" style="width:105px">${a ? num(total(a)) : '—'}</b></div>`;
+    }).join('') + (cases.length > 14 ? `<div class="r dim">… 他 ${cases.length - 14} 件</div>` : '');
+
+  // 費用のまとめ。main はテストが動いていた時間帯の分だけ
+  const mw = d.mainWin?.case, mainTok = mw ? mw.inp + mw.out : 0;
+  const top = ran.slice().sort((a, b) => total(b) - total(a))[0];
+  const t0 = Math.min(...ran.map(a => a.firstTs)), t1 = Math.max(...ran.map(a => a.status === 'done' ? a.lastTs : now));
+  const kv = (k, v, note = '') => `<span style="width:230px" class="mid">${k}</span><b class="num" style="width:110px">${v}</b><span style="width:205px" class="dim">  ${esc(note)}</span>`;
+  $('costRows').innerHTML =
+    `<div class="r">${kv('test cases', num(tok), `${ran.length} 件`)}${kv('main（指揮役）', mainTok ? num(mainTok) : '—', mw ? `${mw.msgs} msgs` : '')}</div>` +
+    `<div class="r">${kv('avg / case', ran.length ? num(tok / ran.length) : '—')}${kv('most expensive', top ? num(total(top)) : '—', top ? 'case ' + top.tag.id : '')}</div>` +
+    `<div class="r">${kv('wall clock', ran.length ? dur(t1 - t0) : '—', '並列実行')}${kv('total', num(tok + mainTok))}</div>`;
+
+  $('status').innerHTML = `regression <b class="green">[${done.length}/${cases.length}]</b>  pass <b class="green">[${pass}]</b>  fail <b class="${fail ? 'red' : 'dim'}">[${fail}]</b>  ` +
+    `tokens <b class="blue">[${num(tok)}]</b>  tool calls <b>[${ran.reduce((t, a) => t + a.toolCalls, 0)}]</b>`;
+}
+
+Watch.start({
+  page: 'regression', scope: 'case',
+  onReset: () => { $('lines').innerHTML = ''; },
+  onSnapshot(d, fresh, first) {
+    tags = new Map(d.agents.map(a => [a.key, a.tag ? `${a.tag.kind}:${a.tag.id}` : a.name]));
+    render(d);
+    // この画面では、テストケースと main の呼び出しだけをログに出す
+    const w = d.mainWin?.case;        // main は、この実行が動いていた時間帯の呼び出しだけ
+    const mine = fresh.filter(e => e.key === 'main' ? w && e.ts >= w.from && e.ts <= w.to : (tags.get(e.key) || '').startsWith('case:'));
+    addLog(first ? mine.slice(-8) : mine.slice(-12), !first);
+  },
+});
+</script>
+</body>
+</html>

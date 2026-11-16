@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI native 開発フローの可視化デモ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root { --bg: #1a1b26; --fg: #c8d0f0; --mid: #8e98c0; --dim: #5b6488; --line: #3b4261;
+    --orange: #f5a97f; --blue: #8fb4f8; --green: #a3d9a5; --purple: #b9a8f7; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0c0d13; color: var(--fg); font: 16px/1.8 system-ui, -apple-system, "Hiragino Sans", sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 48px 20px 64px; }
+  .eyebrow { font: 700 13px/1 "JetBrains Mono", Menlo, monospace; letter-spacing: .12em; color: var(--green); }
+  h1 { font-size: clamp(26px, 5vw, 36px); line-height: 1.35; margin: 14px 0 12px; text-wrap: balance; }
+  h2 { font-size: 19px; margin: 44px 0 10px; }
+  p { margin: 0 0 12px; color: #b4bcdc; max-width: 66ch; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-top: 22px; }
+  a.card { display: block; padding: 18px 18px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg);
+    color: inherit; text-decoration: none; border-top: 3px solid var(--c); }
+  a.card:hover { border-color: var(--c); }
+  a.card:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+  a.card b { display: block; font-size: 17px; margin-bottom: 4px; }
+  a.card span { display: block; color: var(--mid); font-size: 14px; line-height: 1.65; }
+  a.card em { display: block; margin-top: 10px; font-style: normal; font-size: 13px; color: var(--c); }
+  table { border-collapse: collapse; width: 100%; font-size: 14.5px; margin-top: 6px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #262a3d; vertical-align: top; }
+  th { color: var(--mid); font-weight: 600; }
+  td.n { text-align: right; font-family: "JetBrains Mono", Menlo, monospace; white-space: nowrap; }
+  ul { margin: 0; padding-left: 1.2em; color: #b4bcdc; } li { margin-bottom: 6px; }
+  code { font: 14px "JetBrains Mono", Menlo, monospace; color: var(--orange); }
+  .wrap { overflow-x: auto; }
+  footer { margin-top: 48px; color: var(--dim); font-size: 13.5px; }
+  footer a { color: var(--mid); }
+</style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">RECORDED DEMO</div>
+  <h1>エージェント化した開発フローとリグレッションテストを、動かしながら見る</h1>
+  <p>Claude Code のサブエージェントに開発の各工程とテストケースを割り当て、どこが動いていて、どこでどれだけトークンを使ったかを画面に出した例です。実際に流した1回分の記録を、再生ボタンで何度でも見直せます。</p>
+
+  <div class="cards">
+    <a class="card" href="flow.html" style="--c: var(--orange)"><b>開発フロー</b><span>仕様整理 → 実装 → テスト → レビューの4工程。工程別のトークン量と、いつ動いたかの帯。</span><em>約2分の記録 →</em></a>
+    <a class="card" href="regression.html" style="--c: var(--green)"><b>リグレッションテスト</b><span>6件を並列実行。進捗、PASS / FAIL、ケースごとの所要時間とトークン量。</span><em>約20秒の記録 →</em></a>
+    <a class="card" href="agents.html" style="--c: var(--blue)"><b>エージェント別</b><span>指揮役とサブエージェントの箱。モデルごとの使用量と、ツール呼び出しの流れ。</span><em>約3分の記録 →</em></a>
+  </div>
+
+  <h2>使い方</h2>
+  <ul>
+    <li>各画面は、最初は実行が終わった状態で表示されます。画面下の <code>▶ 再生</code> を押すと最初から流れます。</li>
+    <li><code>1×</code> <code>3×</code> <code>10×</code> <code>30×</code> で倍速を選べます。終わったら <code>↻ もう一度</code> で見直せます。</li>
+    <li>箱と棒の色はモデルを表します（青 = Haiku、橙 = Sonnet、緑 = 指揮役のモデル）。</li>
+  </ul>
+
+  <h2>何を流した記録か</h2>
+  <p>題材は、メモを保存するだけの小さな Web API です。「保存済みメモの一覧を返す機能を足す」という変更を4工程で通し、変更後の API に対してリグレッションテスト6件を並列で実行しました。1工程・1テストケースを、それぞれ1体のサブエージェントが担当しています。</p>
+  <div class="wrap"><table>
+    <tr><th>工程 / テスト</th><th>モデル</th><th>所要</th><th>トークン</th><th>結果</th></tr>
+    <tr><td>1. 仕様整理</td><td>Haiku 5.5</td><td class="n">0:34</td><td class="n">172k</td><td>仕様書を作成</td></tr>
+    <tr><td>2. 実装</td><td>Sonnet 5.5</td><td class="n">0:22</td><td class="n">165k</td><td>実装し、動作を確認</td></tr>
+    <tr><td>3. テスト</td><td>Haiku 5.5</td><td class="n">0:47</td><td class="n">379k</td><td>自動テスト12件が成功</td></tr>
+    <tr><td>4. レビュー</td><td>Sonnet 5.5</td><td class="n">0:17</td><td class="n">109k</td><td>軽微な指摘4件</td></tr>
+    <tr><td>リグレッション 6件</td><td>Haiku 5.5</td><td class="n">各 0:08〜0:12</td><td class="n">計 728k</td><td>5件 PASS、1件 FAIL</td></tr>
+  </table></div>
+  <p style="margin-top:12px">トークンは、毎ターン読み直す入力（キャッシュ読み取りを含む）と出力の合計です。FAIL の1件は、落ちたときの見え方を示すために入れた、実際に満たされていない期待です。</p>
+
+  <h2>この記録から読み取れたこと</h2>
+  <ul>
+    <li><b>指揮役が全体の約7割を使っていた。</b>文脈の大きいセッションが指揮すると、サブエージェントを1体起動するたびに全部を読み直すためです。指揮役は文脈の小さい専用セッションにするのが最初の改善になります。</li>
+    <li><b>10秒で終わるテストに10万トークン以上かかっていた。</b>大半は、エージェントが1往復ごとに読む初期文脈の固定費です。決まった手順の確認はスクリプトにし、エージェントは判断が要る箇所だけに使うほうが安くなります。</li>
+    <li><b>工程ではテストが最も重かった。</b>往復回数が多いほど増えるので、指示の出し方で減らせます。</li>
+  </ul>
+
+  <h2>仕組み</h2>
+  <p>Claude Code が手元に残すセッション記録（メッセージとツール呼び出しが1行ずつ追記されるファイル）を読み、エージェント別に集計しています。エージェントの説明の先頭に <code>flow:工程ID</code> / <code>case:ケースID</code> という札を付け、報告の最終行の <code>RESULT: PASS</code> / <code>RESULT: FAIL</code> を合否として読みます。手元では実行中の様子をライブで表示でき、このページはその1回分を書き出したものです。</p>
+
+  <footer>記録データに含まれる手元のファイルパスとセッション名は、公開用に置き換えています。<br>
+  背景と意図: <a href="https://github.com/ryota-nakazawa/AI_native_dev">AI native開発方針（GitHub）</a></footer>
+</main>
+</body>
+</html>

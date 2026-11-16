@@ -1,0 +1,62 @@
+/* 3つの画面 (エージェント別 / 開発フロー / リグレッション) で共通の見た目 */
+:root {
+  --bg: #1a1b26; --bar: #15161e; --fg: #c8d0f0; --mid: #8e98c0; --dim: #5b6488; --line: #3b4261;
+  --orange: #f5a97f; --blue: #8fb4f8; --green: #a3d9a5; --purple: #b9a8f7; --red: #f7768e;
+  --row: 30.72px;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; background: #0c0d13; overflow: hidden; }
+body { font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, "Hiragino Sans", monospace; }
+
+/* 1200x1500 の固定ステージをウィンドウに合わせて拡大縮小する */
+#stage { position: absolute; left: 50%; top: 50%; width: 1200px; height: 1500px; transform-origin: 0 0;
+  background: var(--bg); color: var(--fg); font-size: 19.6px; line-height: var(--row); white-space: pre;
+  border-radius: 14px; overflow: hidden; font-variant-ligatures: none; }
+#stage > * { position: absolute; }
+b { font-weight: 700; }
+.dim { color: var(--dim); } .mid { color: var(--mid); }
+.orange { color: var(--orange); } .blue { color: var(--blue); } .green { color: var(--green); }
+.purple { color: var(--purple); } .red { color: var(--red); }
+
+#titlebar { left: 0; top: 0; width: 1200px; height: 42px; background: var(--bar); text-align: center;
+  line-height: 42px; font-size: 15px; color: var(--dim); }
+#titlebar i { position: absolute; top: 14px; width: 14px; height: 14px; border-radius: 50%; }
+#header { left: 0; width: 1200px; top: 68px; text-align: center; font-weight: 700; letter-spacing: .5px; }
+#mode { padding: 3px 12px; border-radius: 4px; background: rgba(163,217,165,.14); color: var(--green); }
+#mode.replay { background: rgba(245,169,127,.14); color: var(--orange); }
+#mode.off { background: rgba(247,118,142,.14); color: var(--red); }
+#rule { left: 42px; top: 112px; width: 1127px; border-top: 1px solid #262a3d; }
+.sec { left: 42px; width: 1127px; color: var(--mid); }
+
+.panel { left: 42px; width: 1127px; border: 1px solid var(--line); padding: 20px 18px 0; }
+.panel .title { position: absolute; left: 22px; top: -16px; background: var(--bg); padding: 0 10px; color: var(--mid); }
+.r { display: flex; align-items: center; height: var(--row); }
+.r > * { flex: none; overflow: hidden; }
+.r.head { color: var(--dim); }
+.r.queued { opacity: .45; }
+.bar { height: 18px; background: rgba(143,180,248,.12); position: relative; }
+.bar s { position: absolute; left: 0; top: 0; bottom: 0; background: var(--c, var(--blue)); transition: width .4s; }
+.num { text-align: right; }
+
+#log .l { height: var(--row); color: var(--mid); opacity: .75; overflow: hidden; }
+#log .l:last-child { opacity: 1; color: var(--fg); }
+#log .l.in { animation: slide .25s ease-out; }
+@keyframes slide { from { opacity: 0; transform: translateY(8px); } }
+#status { left: 42px; top: 1424px; color: var(--mid); }
+
+/* 画面下の操作バー: 画面の切り替え、ライブ / 再生、倍速 */
+#ctl { position: fixed; left: 0; right: 0; bottom: 0; min-height: 52px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  padding: 7px 10px; background: #12131b; border-top: 1px solid #262a3d; color: #8e98c0;
+  font: 13px/1 system-ui, -apple-system, "Hiragino Sans", sans-serif; white-space: nowrap; }
+#ctl a, #ctl button { font: inherit; color: #c8d0f0; background: #1e2030; border: 1px solid #3b4261; border-radius: 6px;
+  padding: 8px 9px; cursor: pointer; text-decoration: none; flex: none; }
+#ctl a:hover, #ctl button:hover { border-color: #8e98c0; }
+#ctl a.on, #ctl button.on { background: #2d3352; border-color: #8fb4f8; color: #fff; }
+#ctl button.play { border-color: #f5a97f; color: #f5a97f; }
+#ctl button.play.on { background: #4a3327; color: #fff; }
+#ctl button:focus-visible, #ctl a:focus-visible { outline: 2px solid #8fb4f8; outline-offset: 2px; }
+#ctl .gap { flex: 1 1 4px; min-width: 4px; }
+#ctl .sep { width: 1px; height: 24px; background: #2d3148; margin: 0 2px; flex: none; }
+#ctl .track { flex: 0 1 160px; min-width: 50px; height: 6px; background: #262a3d; border-radius: 3px; overflow: hidden; }
+#ctl .track s { display: block; height: 100%; width: 0; background: #f5a97f; }
+#ctl .note { flex: none; min-width: 84px; font-variant-numeric: tabular-nums; }

@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dev flow watch</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="common.css">
+<style>
+  /* 工程の箱 */
+  #stages { left: 0; top: 0; }
+  .st { position: absolute; top: 177px; height: 193px; border: 2px dashed var(--line); background: #171822;
+    display: flex; flex-direction: column; justify-content: center; align-items: center; opacity: .5;
+    transition: border-color .35s, box-shadow .35s, opacity .35s; }
+  .st.run { border: 2px solid var(--c); opacity: 1; box-shadow: 0 0 22px color-mix(in srgb, var(--c) 40%, transparent); }
+  .st.done { border: 2px solid var(--c); opacity: 1; }
+  .arrow { position: absolute; top: 258px; width: 27px; text-align: center; color: var(--dim); }
+  #tok { top: 406px; height: 226px; }
+  /* いつ・どの工程が動いていたかの帯 */
+  #gantt { top: 668px; height: 196px; }
+  #gantt .lane { position: relative; width: 841px; height: 18px; background: rgba(143,180,248,.06); }
+  #gantt .lane s { position: absolute; top: 0; bottom: 0; background: var(--c); min-width: 3px; }
+  #detail { top: 900px; height: 196px; }
+  #log { top: 1132px; height: 266px; padding: 13px 18px 0; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="titlebar"><i style="left:16px;background:#ff5f57"></i><i style="left:38px;background:#febc2e"></i><i style="left:60px;background:#28c840"></i><span id="tb">dev flow watch</span></div>
+  <div id="header">DEV FLOW WATCH  <span class="dim">·</span>  <span id="mode" class="off">CONNECTING</span>  <span class="dim">·</span>  <span id="clock" class="mid">--:--:--</span></div>
+  <div id="rule"></div>
+  <div class="sec" style="top:130px"><b class="orange">DEV FLOW</b>  <span id="flowTitle"></span></div>
+  <div id="stages"></div>
+  <div class="panel" id="tok"><span class="title">tokens by stage <span class="dim">(in + cache + out)</span></span><div id="tokRows"></div></div>
+  <div class="panel" id="gantt"><span class="title">timeline <span class="dim" id="ganttSpan"></span></span><div id="ganttRows"></div></div>
+  <div class="panel" id="detail"><span class="title">stage detail</span><div id="detailRows"></div></div>
+  <div class="panel" id="log"><span class="title">tool calls</span><div id="lines"></div></div>
+  <div id="status"></div>
+</div>
+
+<script>window.WATCH_STATIC = true;</script>
+<script src="common.js"></script>
+<script>
+const { $, esc, cut, num, dur, short, tool, fam, HEX, spin, total, nowOf, pickAgents, stateOf, timeOf } = Watch;
+let tags = new Map();
+const addLog = Watch.logger($('lines'), 8, e => tags.get(e.key) || e.name);
+
+function render(d) {
+  const now = nowOf(d), mf = d.manifest || {};
+  const flow = mf.flow || [], fa = pickAgents(d, 'flow');
+  $('flowTitle').textContent = mf.flowTitle || (flow.length ? '' : '— manifest.json に flow がありません —');
+
+  // 工程の箱
+  const n = Math.max(1, flow.length), gap = 27, w = (1127 - gap * (n - 1)) / n;
+  $('stages').innerHTML = flow.map((s, i) => {
+    const a = fa.get(s.id), st = stateOf(a), c = a ? fam(a.model) : 'dim', x = 42 + i * (w + gap);
+    const doing = st === 'queued' ? '· queued' : st === 'done' ? '✓ done ' + timeOf(a, now)
+      : spin() + ' ' + esc(cut(a.status === 'tool' ? tool(a.lastTool) : 'thinking', 10)) + ' ' + timeOf(a, now);
+    return `<div class="st ${st}" style="left:${x}px;width:${w}px;--c:${HEX[c]}"><b>${i + 1}. ${esc(s.label)}</b>` +
+      `<span class="${c}">${a ? esc(short(a.model)) : '—'}</span>` +
+      (a ? `<span>${a.toolCalls} calls · out ${num(a.out)}</span><b>${num(total(a))} tokens</b>` : '<span> </span><span> </span>') +
+      `<span class="${st === 'queued' ? 'dim' : c}">${doing}</span></div>` + (i < n - 1 ? `<div class="arrow" style="left:${x + w}px">→</div>` : '');
+  }).join('');
+
+  // 工程別トークン。main はこの開発フローが動いていた時間帯の分だけ
+  const mw = d.mainWin?.flow;
+  const rows = [{ label: 'main（指揮役）', v: mw ? mw.inp + mw.out : 0, c: 'green', note: mw ? `${mw.msgs} msgs` : '' },
+    ...flow.map((s, i) => { const a = fa.get(s.id); return { label: `${i + 1}. ${s.label}`, v: total(a), c: a ? fam(a.model) : 'dim', note: a ? timeOf(a, now) : '' }; })];
+  const sum = rows.reduce((t, r) => t + r.v, 0), max = Math.max(1, ...rows.map(r => r.v));
+  $('tokRows').innerHTML = rows.map(r =>
+    `<div class="r"><span style="width:250px">${esc(r.label)}</span><span class="bar" style="width:520px;--c:${HEX[r.c]}"><s style="width:${r.v / max * 100}%"></s></span>` +
+    `<b class="num" style="width:110px">${r.v ? num(r.v) : '—'}</b><span class="num mid" style="width:80px">${sum && r.v ? Math.round(r.v / sum * 100) + '%' : ''}</span><span class="num dim" style="width:125px">${esc(r.note)}</span></div>`).join('') +
+    `<div class="r"><span style="width:770px" class="mid">total</span><b class="num" style="width:110px">${num(sum)}</b></div>`;
+
+  // 帯: 最初の工程の開始から、最後の工程の終わり (動作中なら現在) まで
+  const started = [...fa.values()];
+  const t0 = Math.min(...started.map(a => a.firstTs)), t1 = Math.max(...started.map(a => a.status === 'done' ? a.lastTs : now));
+  const span = Math.max(1, t1 - t0);
+  $('ganttSpan').textContent = started.length ? `· ${dur(span)}` : '';
+  $('ganttRows').innerHTML = flow.map((s, i) => {
+    const a = fa.get(s.id);
+    const bar = a ? `<s style="left:${(a.firstTs - t0) / span * 100}%;width:${((a.status === 'done' ? a.lastTs : now) - a.firstTs) / span * 100}%;--c:${HEX[fam(a.model)]}"></s>` : '';
+    return `<div class="r ${stateOf(a)}"><span style="width:250px">${i + 1}. ${esc(s.label)}</span><span class="lane">${bar}</span></div>`;
+  }).join('') + `<div class="r dim"><span style="width:250px"></span><span style="width:841px;display:flex;justify-content:space-between"><span>0:00</span><span>${started.length ? dur(span / 2) : ''}</span><span>${started.length ? dur(span) : ''}</span></span></div>`;
+
+  // 工程ごとの明細
+  $('detailRows').innerHTML = `<div class="r head"><span style="width:250px">stage</span><span style="width:170px">model</span><span class="num" style="width:90px">calls</span><span class="num" style="width:120px">ctx</span><span class="num" style="width:120px">out</span><span class="num" style="width:150px">tokens</span><span class="num" style="width:185px">result</span></div>` +
+    flow.map((s, i) => {
+      const a = fa.get(s.id), st = stateOf(a);
+      const res = st === 'queued' ? '<span class="dim">queued</span>' : st === 'run' ? `<span class="blue">${spin()} running</span>`
+        : a.result === 'PASS' ? '<b class="green">✓ PASS</b>' : a.result === 'FAIL' ? '<b class="red">✗ FAIL</b>' : '<span class="orange">done</span>';
+      return `<div class="r ${st}"><span style="width:250px">${i + 1}. ${esc(s.label)}</span><span class="${a ? fam(a.model) : 'dim'}" style="width:170px">${a ? esc(short(a.model)) : '—'}</span>` +
+        `<span class="num" style="width:90px">${a ? a.toolCalls : '—'}</span><span class="num" style="width:120px">${a ? num(a.ctx) : '—'}</span><span class="num" style="width:120px">${a ? num(a.out) : '—'}</span>` +
+        `<b class="num" style="width:150px">${a ? num(total(a)) : '—'}</b><span class="num" style="width:185px">${res}</span></div>`;
+    }).join('');
+
+  const doneN = flow.filter(s => stateOf(fa.get(s.id)) === 'done').length;
+  $('status').innerHTML = `flow <b class="orange">[${doneN}/${flow.length}]</b>  stage tokens <b class="blue">[${num(started.reduce((t, a) => t + total(a), 0))}]</b>  ` +
+    `tool calls <b>[${started.reduce((t, a) => t + a.toolCalls, 0)}]</b>  elapsed <b class="green">[${started.length ? dur(span) : '0:00'}]</b>`;
+}
+
+Watch.start({
+  page: 'flow', scope: 'flow',
+  onReset: () => { $('lines').innerHTML = ''; },
+  onSnapshot(d, fresh, first) {
+    tags = new Map(d.agents.map(a => [a.key, a.tag ? `${a.tag.kind}:${a.tag.id}` : a.name]));
+    render(d);
+    // この画面では、開発フローの工程と main の呼び出しだけをログに出す
+    const w = d.mainWin?.flow;        // main は、この実行が動いていた時間帯の呼び出しだけ
+    const mine = fresh.filter(e => e.key === 'main' ? w && e.ts >= w.from && e.ts <= w.to : (tags.get(e.key) || '').startsWith('flow:'));
+    addLog(first ? mine.slice(-8) : mine.slice(-12), !first);
+  },
+});
+</script>
+</body>
+</html>
